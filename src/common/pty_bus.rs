@@ -72,16 +72,23 @@ pub enum PtyInstruction {
     SpawnTerminalVertically(Option<PathBuf>),
     SpawnTerminalHorizontally(Option<PathBuf>),
     NewTab,
+    UpdateActivePane(Option<PaneId>),
     ClosePane(PaneId),
     CloseTab(Vec<PaneId>),
     Quit,
+}
+
+pub struct ChildIds {
+    child: RawFd,
+    shell: RawFd,
 }
 
 pub struct PtyBus {
     pub send_screen_instructions: SenderWithContext<ScreenInstruction>,
     pub send_plugin_instructions: SenderWithContext<PluginInstruction>,
     pub receive_pty_instructions: Receiver<(PtyInstruction, ErrorContext)>,
-    pub id_to_child_pid: HashMap<RawFd, RawFd>,
+    pub pids: HashMap<RawFd, ChildIds>,
+    pub active_pane: Option<PaneId>,
     os_input: Box<dyn OsApi>,
     debug_to_file: bool,
     task_handles: HashMap<RawFd, JoinHandle<()>>,
@@ -169,31 +176,76 @@ impl PtyBus {
             send_plugin_instructions,
             receive_pty_instructions,
             os_input,
-            id_to_child_pid: HashMap::new(),
+            pids: HashMap::new(),
+            active_pane: None,
             debug_to_file,
             task_handles: HashMap::new(),
         }
     }
-    pub fn spawn_terminal(&mut self, file_to_open: Option<PathBuf>) -> RawFd {
-        let (pid_primary, pid_secondary): (RawFd, RawFd) =
-            self.os_input.spawn_terminal(file_to_open);
+    fn terminal_spawner(
+        &mut self,
+        file_to_open: Option<PathBuf>,
+        working_directory: Option<PathBuf>,
+    ) -> RawFd {
+        let (pid_parent, pid_child, pid_shell): (RawFd, RawFd, RawFd) = self
+            .os_input
+            .spawn_terminal(file_to_open, working_directory);
         let task_handle = stream_terminal_bytes(
-            pid_primary,
+            pid_parent,
             self.send_screen_instructions.clone(),
             self.os_input.clone(),
             self.debug_to_file,
         );
-        self.task_handles.insert(pid_primary, task_handle);
-        self.id_to_child_pid.insert(pid_primary, pid_secondary);
-        pid_primary
+        self.task_handles.insert(pid_parent, task_handle);
+        self.pids.insert(
+            pid_parent,
+            ChildIds {
+                child: pid_child,
+                shell: pid_shell,
+            },
+        );
+        self.active_pane = Some(PaneId::Terminal(pid_parent));
+        pid_parent
+    }
+    pub fn spawn_terminal(&mut self, file_to_open: Option<PathBuf>) -> RawFd {
+        // Get pid from the current active pane
+        let pid = match self.active_pane {
+            Some(active_pane) => match active_pane {
+                PaneId::Terminal(id) => {
+                    let pids = self.pids.get(&id).unwrap();
+                    Some(pids.shell)
+                }
+                PaneId::Plugin(pi) => {
+                    let pids = self.pids.get(&(pi as i32)).unwrap();
+                    Some(pids.shell)
+                }
+            },
+            None => None,
+        };
+
+        // Get the current working directory from our pid
+        let working_directory: Option<PathBuf> = match pid {
+            Some(pid) => self.os_input.get_cwd(pid),
+            None => None,
+        };
+
+        self.terminal_spawner(file_to_open, working_directory)
     }
     pub fn spawn_terminals_for_layout(&mut self, layout: Layout) {
         let total_panes = layout.total_terminal_panes();
         let mut new_pane_pids = vec![];
         for _ in 0..total_panes {
-            let (pid_primary, pid_secondary): (RawFd, RawFd) = self.os_input.spawn_terminal(None);
-            self.id_to_child_pid.insert(pid_primary, pid_secondary);
-            new_pane_pids.push(pid_primary);
+            let (pid_parent, pid_child, pid_shell): (RawFd, RawFd, RawFd) =
+                self.os_input.spawn_terminal(None, None);
+            self.pids.insert(
+                pid_parent,
+                ChildIds {
+                    child: pid_child,
+                    shell: pid_shell,
+                },
+            );
+            self.active_pane = Some(PaneId::Terminal(pid_parent));
+            new_pane_pids.push(pid_parent);
         }
         self.send_screen_instructions
             .send(ScreenInstruction::ApplyLayout((
@@ -214,9 +266,9 @@ impl PtyBus {
     pub fn close_pane(&mut self, id: PaneId) {
         match id {
             PaneId::Terminal(id) => {
-                let child_pid = self.id_to_child_pid.remove(&id).unwrap();
+                let child_pids = self.pids.remove(&id).unwrap();
                 let handle = self.task_handles.remove(&id).unwrap();
-                self.os_input.kill(child_pid).unwrap();
+                self.os_input.kill(child_pids.child).unwrap();
                 task::block_on(async {
                     handle.cancel().await;
                 });
@@ -232,11 +284,14 @@ impl PtyBus {
             self.close_pane(id);
         });
     }
+    pub fn update_active_pane(&mut self, pane_id: Option<PaneId>) {
+        self.active_pane = pane_id;
+    }
 }
 
 impl Drop for PtyBus {
     fn drop(&mut self) {
-        let child_ids: Vec<RawFd> = self.id_to_child_pid.keys().copied().collect();
+        let child_ids: Vec<RawFd> = self.pids.keys().copied().collect();
         for id in child_ids {
             self.close_pane(PaneId::Terminal(id));
         }

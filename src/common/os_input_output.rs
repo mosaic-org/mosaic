@@ -1,6 +1,11 @@
 use crate::panes::PositionAndSize;
+
+#[cfg(target_os = "macos")]
+use darwin_libproc;
+
+use byteorder::{BigEndian, ByteOrder};
 use nix::fcntl::{fcntl, FcntlArg, OFlag};
-use nix::pty::{forkpty, Winsize};
+use nix::pty::{forkpty, ForkptyResult, Winsize};
 use nix::sys::signal::{kill, Signal};
 use nix::sys::termios;
 use nix::sys::wait::waitpid;
@@ -12,6 +17,9 @@ use std::os::unix::io::RawFd;
 use std::path::PathBuf;
 use std::process::{Child, Command};
 use std::sync::{Arc, Mutex};
+
+#[cfg(target_os = "linux")]
+use std::fs;
 
 use signal_hook::{consts::signal::*, iterator::Signals};
 
@@ -94,63 +102,131 @@ fn handle_command_exit(mut child: Child) {
 }
 
 /// Spawns a new terminal from the parent terminal with [`termios`](termios::Termios)
-/// `orig_termios`.
-///
-/// If a `file_to_open` is given, the text editor specified by environment variable `EDITOR`
-/// (or `VISUAL`, if `EDITOR` is not set) will be started in the new terminal, with the given
-/// file open. If no file is given, the shell specified by environment variable `SHELL` will
-/// be started in the new terminal.
-///
-/// # Panics
-///
-/// This function will panic if both the `EDITOR` and `VISUAL` environment variables are not
-/// set.
-// FIXME this should probably be split into different functions, or at least have less levels
-// of indentation in some way
-fn spawn_terminal(file_to_open: Option<PathBuf>, orig_termios: termios::Termios) -> (RawFd, RawFd) {
-    let (pid_primary, pid_secondary): (RawFd, RawFd) = {
+/// `orig_termios`. Let `handle_pty_fork` handle a successful fork, otherwire panic.
+fn spawn_terminal(
+    file_to_open: Option<PathBuf>,
+    orig_termios: termios::Termios,
+    working_dir: Option<PathBuf>,
+) -> (RawFd, RawFd, RawFd) {
+    // Create a pipe to allow the child the communicate the shell's pid to it's
+    // parent.
+    let (parent_fd, child_fd) = unistd::pipe().expect("failed to create pipe");
+
+    let (pid_parent, pid_child, pid_shell): (RawFd, RawFd, RawFd) = {
         match forkpty(None, Some(&orig_termios)) {
             Ok(fork_pty_res) => {
-                let pid_primary = fork_pty_res.master;
-                let pid_secondary = match fork_pty_res.fork_result {
-                    ForkResult::Parent { child } => {
-                        // fcntl(pid_primary, FcntlArg::F_SETFL(OFlag::empty())).expect("could not fcntl");
-                        fcntl(pid_primary, FcntlArg::F_SETFL(OFlag::O_NONBLOCK))
-                            .expect("could not fcntl");
-                        child
-                    }
-                    ForkResult::Child => match file_to_open {
-                        Some(file_to_open) => {
-                            if env::var("EDITOR").is_err() && env::var("VISUAL").is_err() {
-                                panic!("Can't edit files if an editor is not defined. To fix: define the EDITOR or VISUAL environment variables with the path to your editor (eg. /usr/bin/vim)");
-                            }
-                            let editor =
-                                env::var("EDITOR").unwrap_or_else(|_| env::var("VISUAL").unwrap());
-
-                            let child = Command::new(editor)
-                                .args(&[file_to_open])
-                                .spawn()
-                                .expect("failed to spawn");
-                            handle_command_exit(child);
-                            ::std::process::exit(0);
-                        }
-                        None => {
-                            let child = Command::new(env::var("SHELL").unwrap())
-                                .spawn()
-                                .expect("failed to spawn");
-                            handle_command_exit(child);
-                            ::std::process::exit(0);
-                        }
-                    },
-                };
-                (pid_primary, pid_secondary.as_raw())
+                handle_pty_fork(fork_pty_res, file_to_open, working_dir, parent_fd, child_fd)
             }
             Err(e) => {
                 panic!("failed to fork {:?}", e);
             }
         }
     };
-    (pid_primary, pid_secondary)
+    (pid_parent, pid_child, pid_shell)
+}
+
+/// Handle a succefull pty fork.
+///
+/// If a `file_to_open` is given, the text editor specified by environment variable `EDITOR`
+/// (or `VISUAL`, if `EDITOR` is not set) will be started in the new terminal, with the given
+/// file open. If no file is given, the shell specified by environment variable `SHELL` will
+/// be started in the new terminal.
+///
+/// If a `working_dir` is given, the shell will be started at `working_dir`
+///
+/// # Panics
+///
+/// This function will panic if both the `EDITOR` and `VISUAL` environment variables are not
+/// set.
+fn handle_pty_fork(
+    fork_pty_res: ForkptyResult,
+    file_to_open: Option<PathBuf>,
+    working_dir: Option<PathBuf>,
+    parent_fd: RawFd,
+    child_fd: RawFd,
+) -> (RawFd, RawFd, RawFd) {
+    let pid_parent = fork_pty_res.master;
+    let (pid_child, pid_shell) = match fork_pty_res.fork_result {
+        ForkResult::Parent { child } => {
+            fcntl(pid_parent, FcntlArg::F_SETFL(OFlag::O_NONBLOCK)).expect("could not fcntl");
+            let pid_shell: u32 = read_from_pipe(parent_fd, child_fd);
+            (child, pid_shell)
+        }
+        ForkResult::Child => match file_to_open {
+            Some(file_to_open) => {
+                if env::var("EDITOR").is_err() && env::var("VISUAL").is_err() {
+                    panic!(
+                        "Can't edit files if an editor is not defined.
+                        To fix: define the EDITOR or VISUAL environment
+                        variables with the path to your editor (eg. /usr/bin/vim)"
+                    );
+                }
+                let editor = env::var("EDITOR").unwrap_or_else(|_| env::var("VISUAL").unwrap());
+
+                let child = Command::new(editor)
+                    .args(&[file_to_open])
+                    .spawn()
+                    .expect("failed to spawn");
+                handle_command_exit(child);
+                ::std::process::exit(0);
+            }
+            None => {
+                let child = match working_dir {
+                    Some(working_dir) => Command::new(env::var("SHELL").unwrap())
+                        .current_dir(working_dir)
+                        .spawn()
+                        .expect("failed to spawn"),
+                    None => Command::new(env::var("SHELL").unwrap())
+                        .spawn()
+                        .expect("failed to spawn"),
+                };
+
+                write_to_pipe(child.id() as u32, parent_fd, child_fd);
+
+                handle_command_exit(child);
+                ::std::process::exit(0);
+            }
+        },
+    };
+    (pid_parent, pid_child.as_raw(), pid_shell as i32)
+}
+
+/// Read from a pipe given both file descriptors
+///
+/// # Panics
+///
+/// This function will panic if a close operation on one of the file descriptors fails or if the
+/// read operation fails.
+fn read_from_pipe(parent_fd: RawFd, child_fd: RawFd) -> u32 {
+    let mut buffer = [0; 4];
+    unistd::close(child_fd).expect("Read: couldn't close child_fd");
+    match unistd::read(parent_fd, &mut buffer) {
+        Ok(_) => {}
+        Err(e) => {
+            panic!("Read operation failed: {:?}", e);
+        }
+    }
+    unistd::close(parent_fd).expect("Read: couldn't close parent_fd");
+    u32::from_be_bytes(buffer)
+}
+
+/// Write to a pipe given both file descriptors
+///
+/// # Panics
+///
+/// This function will panic if a close operation on one of the file descriptors fails or if the
+/// write operation fails.
+fn write_to_pipe(data: u32, parent_fd: RawFd, child_fd: RawFd) {
+    let mut buff = [0; 4];
+    BigEndian::write_u32(&mut buff, data);
+    unistd::close(parent_fd).expect("Write: couldn't close parent_fd");
+    match unistd::write(child_fd, &buff) {
+        Ok(_) => {}
+        Err(e) => {
+            panic!("Write operation failed: {:?}", e);
+        }
+    }
+    unistd::close(child_fd).expect("Write: couldn't close child_fd");
 }
 
 #[derive(Clone)]
@@ -172,7 +248,11 @@ pub trait OsApi: Send + Sync {
     /// [cooked mode](https://en.wikipedia.org/wiki/Terminal_mode).
     fn unset_raw_mode(&mut self, fd: RawFd);
     /// Spawn a new terminal, with an optional file to open in a terminal program.
-    fn spawn_terminal(&mut self, file_to_open: Option<PathBuf>) -> (RawFd, RawFd);
+    fn spawn_terminal(
+        &mut self,
+        file_to_open: Option<PathBuf>,
+        working_dir: Option<PathBuf>,
+    ) -> (RawFd, RawFd, RawFd);
     /// Read bytes from the standard output of the virtual terminal referred to by `fd`.
     fn read_from_tty_stdout(&mut self, fd: RawFd, buf: &mut [u8]) -> Result<usize, nix::Error>;
     /// Write bytes to the standard input of the virtual terminal referred to by `fd`.
@@ -191,6 +271,8 @@ pub trait OsApi: Send + Sync {
     /// Returns a [`Box`] pointer to this [`OsApi`] struct.
     fn box_clone(&self) -> Box<dyn OsApi>;
     fn receive_sigwinch(&self, cb: Box<dyn Fn()>);
+    /// Returns the current working directory for a given pid
+    fn get_cwd(&self, pid: RawFd) -> Option<PathBuf>;
 }
 
 impl OsApi for OsInputOutput {
@@ -207,9 +289,13 @@ impl OsApi for OsInputOutput {
         let orig_termios = self.orig_termios.lock().unwrap();
         unset_raw_mode(fd, orig_termios.clone());
     }
-    fn spawn_terminal(&mut self, file_to_open: Option<PathBuf>) -> (RawFd, RawFd) {
+    fn spawn_terminal(
+        &mut self,
+        file_to_open: Option<PathBuf>,
+        working_dir: Option<PathBuf>,
+    ) -> (RawFd, RawFd, RawFd) {
         let orig_termios = self.orig_termios.lock().unwrap();
-        spawn_terminal(file_to_open, orig_termios.clone())
+        spawn_terminal(file_to_open, orig_termios.clone(), working_dir)
     }
     fn read_from_tty_stdout(&mut self, fd: RawFd, buf: &mut [u8]) -> Result<usize, nix::Error> {
         unistd::read(fd, buf)
@@ -259,6 +345,22 @@ impl OsApi for OsInputOutput {
                 }
                 _ => unreachable!(),
             }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn get_cwd(&self, pid: RawFd) -> Option<PathBuf> {
+        match darwin_libproc::pid_cwd(pid) {
+            Ok(cwd) => Some(cwd),
+            Err(_) => None,
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn get_cwd(&self, pid: RawFd) -> Option<PathBuf> {
+        match fs::read_link(format!("/proc/{}/cwd", pid)) {
+            Ok(cwd) => Some(cwd),
+            Err(_) => None,
         }
     }
 }

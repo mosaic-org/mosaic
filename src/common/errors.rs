@@ -271,6 +271,7 @@ pub enum PtyContext {
     SpawnTerminalVertically,
     SpawnTerminalHorizontally,
     NewTab,
+    UpdateActivePane,
     ClosePane,
     CloseTab,
     Quit,
@@ -285,6 +286,7 @@ impl From<&PtyInstruction> for PtyContext {
             PtyInstruction::ClosePane(_) => PtyContext::ClosePane,
             PtyInstruction::CloseTab(_) => PtyContext::CloseTab,
             PtyInstruction::NewTab => PtyContext::NewTab,
+            PtyInstruction::UpdateActivePane(_) => PtyContext::UpdateActivePane,
             PtyInstruction::Quit => PtyContext::Quit,
         }
     }
