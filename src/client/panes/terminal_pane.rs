@@ -10,6 +10,8 @@ use crate::panes::terminal_character::{
 };
 use crate::pty_bus::VteBytes;
 
+use super::output_buffer::OutputBuffer;
+
 #[derive(PartialEq, Eq, Ord, PartialOrd, Hash, Clone, Copy, Debug)]
 pub enum PaneId {
     Terminal(RawFd),
@@ -47,6 +49,7 @@ pub struct TerminalPane {
     pub max_height: Option<usize>,
     pub max_width: Option<usize>,
     pub active_at: Instant,
+    last_buffer: OutputBuffer,
     vte_parser: vte::Parser,
 }
 
@@ -175,10 +178,9 @@ impl Pane for TerminalPane {
         // if self.should_render || cfg!(test) {
         if true {
             let mut vte_output = String::new();
-            let buffer_lines = &self.read_buffer_as_lines();
-            let display_cols = self.get_columns();
-            let mut character_styles = CharacterStyles::new();
-            if self.grid.clear_viewport_before_rendering {
+            let new_output = self.grid.as_output_buffer();
+            // TODO: It would be better to not have to blow away the grid on a resize, but this is the easiest way to get it right initially (see todo! in output_buffer.rs)
+            if !new_output.same_size(&self.last_buffer) || self.grid.clear_viewport_before_rendering {
                 for line_index in 0..self.grid.height {
                     let x = self.get_x();
                     let y = self.get_y();
@@ -191,30 +193,11 @@ impl Pane for TerminalPane {
                         vte_output.push(EMPTY_TERMINAL_CHARACTER.character);
                     }
                 }
+                self.last_buffer = OutputBuffer::new_empty(self.grid.width, self.grid.height);
                 self.grid.clear_viewport_before_rendering = false;
             }
-            for (row, line) in buffer_lines.iter().enumerate() {
-                let x = self.get_x();
-                let y = self.get_y();
-                vte_output.push_str(&format!("\u{1b}[{};{}H\u{1b}[m", y + row + 1, x + 1)); // goto row/col and reset styles
-                for (col, t_character) in line.iter().enumerate() {
-                    if col < display_cols {
-                        // in some cases (eg. while resizing) some characters will spill over
-                        // before they are corrected by the shell (for the prompt) or by reflowing
-                        // lines
-                        if let Some(new_styles) =
-                            character_styles.update_and_return_diff(&t_character.styles)
-                        {
-                            // the terminal keeps the previous styles as long as we're in the same
-                            // line, so we only want to update the new styles here (this also
-                            // includes resetting previous styles as needed)
-                            vte_output.push_str(&new_styles.to_string());
-                        }
-                        vte_output.push(t_character.character);
-                    }
-                }
-                character_styles.clear();
-            }
+            vte_output.push_str(&self.last_buffer.diff(&new_output, (self.x(), self.y())));
+            self.last_buffer = new_output;
             self.grid.should_render = false;
             Some(vte_output)
         } else {
@@ -307,6 +290,7 @@ impl TerminalPane {
             max_width: None,
             vte_parser: vte::Parser::new(),
             active_at: Instant::now(),
+            last_buffer: OutputBuffer::new_empty(position_and_size.columns, position_and_size.rows),
         }
     }
     pub fn get_x(&self) -> usize {
