@@ -1,10 +1,12 @@
 mod first_line;
+mod mode_info;
 mod second_line;
+mod styled_text;
 
 use std::fmt::{Display, Error, Formatter};
 use zellij_tile::prelude::*;
 
-use first_line::{ctrl_keys, superkey};
+use first_line::ctrl_keys;
 use second_line::keybinds;
 
 pub mod colors {
@@ -56,10 +58,7 @@ impl ZellijPlugin for State {
     }
 
     fn render(&mut self, _rows: usize, cols: usize) {
-        let superkey = superkey();
-        let ctrl_keys = ctrl_keys(&self.mode_info, cols - superkey.len);
-
-        let first_line = format!("{}{}", superkey, ctrl_keys);
+        let first_line = ctrl_keys(&self.mode_info, cols);
         let second_line = keybinds(&self.mode_info, cols);
 
         // [48;5;238m is gray background, [0K is so that it fills the rest of the line
