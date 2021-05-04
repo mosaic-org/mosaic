@@ -2118,6 +2118,9 @@ impl Tab {
     pub fn get_pane_ids(&self) -> Vec<PaneId> {
         self.get_panes().map(|(&pid, _)| pid).collect()
     }
+    pub fn get_pane_num(&self) -> usize {
+        self.get_pane_ids().len()
+    }
     pub fn set_pane_selectable(&mut self, id: PaneId, selectable: bool) {
         if let Some(pane) = self.panes.get_mut(&id) {
             pane.set_selectable(selectable);

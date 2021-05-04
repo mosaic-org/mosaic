@@ -306,14 +306,17 @@ pub fn start(mut os_input: Box<dyn OsApi>, opts: CliArgs, config: Config) {
                         ScreenInstruction::NewPane(pid) => {
                             screen.get_active_tab_mut().unwrap().new_pane(pid);
                             command_is_executing.done_opening_new_pane();
+                            screen.update_tabs();
                         }
                         ScreenInstruction::HorizontalSplit(pid) => {
                             screen.get_active_tab_mut().unwrap().horizontal_split(pid);
                             command_is_executing.done_opening_new_pane();
+                            screen.update_tabs();
                         }
                         ScreenInstruction::VerticalSplit(pid) => {
                             screen.get_active_tab_mut().unwrap().vertical_split(pid);
                             command_is_executing.done_opening_new_pane();
+                            screen.update_tabs();
                         }
                         ScreenInstruction::WriteCharacter(bytes) => {
                             let active_tab = screen.get_active_tab_mut().unwrap();
