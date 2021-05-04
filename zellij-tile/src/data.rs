@@ -122,6 +122,7 @@ pub struct TabInfo {
     pub position: usize,
     pub name: String,
     pub active: bool,
+    pub is_fullscreen_active: bool,
     pub is_sync_panes_active: bool,
 }
 

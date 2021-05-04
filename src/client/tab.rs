@@ -701,6 +701,9 @@ impl Tab {
             self.toggle_fullscreen_is_active();
         }
     }
+    pub fn is_fullscreen_active(&self) -> bool {
+        self.fullscreen_is_active
+    }
     pub fn toggle_fullscreen_is_active(&mut self) {
         self.fullscreen_is_active = !self.fullscreen_is_active;
     }

@@ -417,6 +417,7 @@ pub fn start(mut os_input: Box<dyn OsApi>, opts: CliArgs, config: Config) {
                                 .get_active_tab_mut()
                                 .unwrap()
                                 .toggle_active_pane_fullscreen();
+                            screen.update_tabs();
                         }
                         ScreenInstruction::NewTab(pane_id) => {
                             screen.new_tab(pane_id);
