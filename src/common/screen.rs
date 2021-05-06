@@ -55,6 +55,7 @@ pub enum ScreenInstruction {
     CloseTab,
     GoToTab(u32),
     UpdateTabName(Vec<u8>),
+    SearchTab(String),
     TerminalResize,
     ChangeMode(ModeInfo),
 }
@@ -202,6 +203,18 @@ impl Screen {
         }
     }
 
+
+    pub fn search_tab(&mut self, tab_name: String) {
+        let active_tab = self.get_active_tab().unwrap();
+        if let Some(t) = self.tabs.values().find(|t| t.name == tab_name) {
+            if t.index != active_tab.index {
+                self.active_tab_index = Some(t.index);
+                self.update_tabs();
+                self.render();
+            }
+        }
+    }
+
     /// Closes this [`Screen`]'s active [`Tab`], exiting the application if it happens
     /// to be the last tab.
     pub fn close_tab(&mut self) {
@@ -333,6 +346,7 @@ impl Screen {
         }
         self.update_tabs();
     }
+
     pub fn change_mode(&mut self, mode_info: ModeInfo) {
         self.mode_info = mode_info;
         for tab in self.tabs.values_mut() {

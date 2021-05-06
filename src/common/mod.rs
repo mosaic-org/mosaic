@@ -435,6 +435,9 @@ pub fn start(mut os_input: Box<dyn OsApi>, opts: CliArgs, config: Config) {
                         ScreenInstruction::UpdateTabName(c) => {
                             screen.update_active_tab_name(c);
                         }
+                        ScreenInstruction::SearchTab(s) => {
+                            screen.search_tab(s);
+                        }
                         ScreenInstruction::TerminalResize => {
                             screen.resize_to_screen();
                         }

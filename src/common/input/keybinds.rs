@@ -105,6 +105,7 @@ impl Keybinds {
         keybinds
     }
 
+
     /// Converts a [`Key`] terminal event to a sequence of [`Action`]s according to the current
     /// [`InputMode`] and [`Keybinds`].
     pub fn key_to_actions(
@@ -126,6 +127,7 @@ impl Keybinds {
         match *mode {
             InputMode::Normal | InputMode::Locked => mode_keybind_or_action(Action::Write(input)),
             InputMode::RenameTab => mode_keybind_or_action(Action::TabNameInput(input)),
+            InputMode::SearchTab => mode_keybind_or_action(Action::SearchTabInput(input)),
             _ => mode_keybind_or_action(Action::NoOp),
         }
     }
