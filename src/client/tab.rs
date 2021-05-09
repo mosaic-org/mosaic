@@ -2,22 +2,24 @@
 //! as well as how they should be resized
 
 use crate::client::pane_resizer::PaneResizer;
-use crate::common::{input::handler::parse_keys, AppInstruction, SenderWithContext};
+use crate::common::input::handler::parse_keys;
+use crate::common::thread_bus::ThreadSenders;
 use crate::layout::Layout;
-use crate::os_input_output::OsApi;
+use crate::os_input_output::ServerOsApi;
 use crate::panes::{PaneId, PositionAndSize, TerminalPane};
-use crate::pty_bus::{PtyInstruction, VteBytes};
+use crate::pty::{PtyInstruction, VteBytes};
+use crate::server::ServerInstruction;
 use crate::utils::shared::adjust_to_size;
 use crate::wasm_vm::PluginInstruction;
 use crate::{boundaries::Boundaries, panes::PluginPane};
 use serde::{Deserialize, Serialize};
 use std::os::unix::io::RawFd;
+use std::sync::mpsc::channel;
 use std::time::Instant;
 use std::{
     cmp::Reverse,
     collections::{BTreeMap, HashSet},
 };
-use std::{io::Write, sync::mpsc::channel};
 use zellij_tile::data::{Event, InputMode, ModeInfo, Palette};
 
 const CURSOR_HEIGHT_WIDTH_RATIO: usize = 4; // this is not accurate and kind of a magic number, TODO: look into this
@@ -67,11 +69,9 @@ pub struct Tab {
     max_panes: Option<usize>,
     full_screen_ws: PositionAndSize,
     fullscreen_is_active: bool,
+    os_api: Box<dyn ServerOsApi>,
+    pub senders: ThreadSenders,
     synchronize_is_active: bool,
-    os_api: Box<dyn OsApi>,
-    pub send_pty_instructions: SenderWithContext<PtyInstruction>,
-    pub send_plugin_instructions: SenderWithContext<PluginInstruction>,
-    pub send_app_instructions: SenderWithContext<AppInstruction>,
     should_clear_display_before_rendering: bool,
     pub mode_info: ModeInfo,
     pub input_mode: InputMode,
@@ -218,17 +218,15 @@ pub trait Pane {
 }
 
 impl Tab {
-    // FIXME: Too many arguments here! Maybe bundle all of the senders for the whole program in a struct?
+    // FIXME: Still too many arguments for clippy to be happy...
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         index: usize,
         position: usize,
         name: String,
         full_screen_ws: &PositionAndSize,
-        mut os_api: Box<dyn OsApi>,
-        send_pty_instructions: SenderWithContext<PtyInstruction>,
-        send_plugin_instructions: SenderWithContext<PluginInstruction>,
-        send_app_instructions: SenderWithContext<AppInstruction>,
+        mut os_api: Box<dyn ServerOsApi>,
+        senders: ThreadSenders,
         max_panes: Option<usize>,
         pane_id: Option<PaneId>,
         mode_info: ModeInfo,
@@ -260,9 +258,7 @@ impl Tab {
             fullscreen_is_active: false,
             synchronize_is_active: false,
             os_api,
-            send_app_instructions,
-            send_pty_instructions,
-            send_plugin_instructions,
+            senders,
             should_clear_display_before_rendering: false,
             mode_info,
             input_mode,
@@ -314,14 +310,14 @@ impl Tab {
             // Just a regular terminal
             if let Some(plugin) = &layout.plugin {
                 let (pid_tx, pid_rx) = channel();
-                self.send_plugin_instructions
-                    .send(PluginInstruction::Load(pid_tx, plugin.clone()))
+                self.senders
+                    .send_to_plugin(PluginInstruction::Load(pid_tx, plugin.clone()))
                     .unwrap();
                 let pid = pid_rx.recv().unwrap();
                 let mut new_plugin = PluginPane::new(
                     pid,
                     *position_and_size,
-                    self.send_plugin_instructions.clone(),
+                    self.senders.to_plugin.as_ref().unwrap().clone(),
                 );
                 if let Some(max_rows) = position_and_size.max_rows {
                     new_plugin.set_max_height(max_rows);
@@ -331,8 +327,8 @@ impl Tab {
                 }
                 self.panes.insert(PaneId::Plugin(pid), Box::new(new_plugin));
                 // Send an initial mode update to the newly loaded plugin only!
-                self.send_plugin_instructions
-                    .send(PluginInstruction::Update(
+                self.senders
+                    .send_to_plugin(PluginInstruction::Update(
                         Some(pid),
                         Event::ModeUpdate(self.mode_info.clone()),
                     ))
@@ -354,8 +350,8 @@ impl Tab {
             // this is a bit of a hack and happens because we don't have any central location that
             // can query the screen as to how many panes it needs to create a layout
             // fixing this will require a bit of an architecture change
-            self.send_pty_instructions
-                .send(PtyInstruction::ClosePane(PaneId::Terminal(*unused_pid)))
+            self.senders
+                .send_to_pty(PtyInstruction::ClosePane(PaneId::Terminal(*unused_pid)))
                 .unwrap();
         }
         self.active_terminal = self.panes.iter().map(|(id, _)| id.to_owned()).next();
@@ -399,8 +395,8 @@ impl Tab {
                 },
             );
             if terminal_id_to_split.is_none() {
-                self.send_pty_instructions
-                    .send(PtyInstruction::ClosePane(pid)) // we can't open this pane, close the pty
+                self.senders
+                    .send_to_pty(PtyInstruction::ClosePane(pid)) // we can't open this pane, close the pty
                     .unwrap();
                 return; // likely no terminal large enough to split
             }
@@ -480,8 +476,8 @@ impl Tab {
             let active_pane_id = &self.get_active_pane_id().unwrap();
             let active_pane = self.panes.get_mut(active_pane_id).unwrap();
             if active_pane.rows() < MIN_TERMINAL_HEIGHT * 2 + 1 {
-                self.send_pty_instructions
-                    .send(PtyInstruction::ClosePane(pid)) // we can't open this pane, close the pty
+                self.senders
+                    .send_to_pty(PtyInstruction::ClosePane(pid)) // we can't open this pane, close the pty
                     .unwrap();
                 return;
             }
@@ -537,8 +533,8 @@ impl Tab {
             let active_pane_id = &self.get_active_pane_id().unwrap();
             let active_pane = self.panes.get_mut(active_pane_id).unwrap();
             if active_pane.columns() < MIN_TERMINAL_WIDTH * 2 + 1 {
-                self.send_pty_instructions
-                    .send(PtyInstruction::ClosePane(pid)) // we can't open this pane, close the pty
+                self.senders
+                    .send_to_pty(PtyInstruction::ClosePane(pid)) // we can't open this pane, close the pty
                     .unwrap();
                 return;
             }
@@ -596,7 +592,7 @@ impl Tab {
     }
     pub fn handle_pty_bytes(&mut self, pid: RawFd, bytes: VteBytes) {
         // if we don't have the terminal in self.terminals it's probably because
-        // of a race condition where the terminal was created in pty_bus but has not
+        // of a race condition where the terminal was created in pty but has not
         // yet been created in Screen. These events are currently not buffered, so
         // if you're debugging seemingly randomly missing stdout data, this is
         // the reason
@@ -606,23 +602,17 @@ impl Tab {
     }
     pub fn write_to_terminals_on_current_tab(&mut self, input_bytes: Vec<u8>) {
         let pane_ids = self.get_pane_ids();
-        pane_ids.iter().for_each(|pane_id| match pane_id {
-            PaneId::Terminal(pid) => {
-                self.write_to_pane_id(input_bytes.clone(), *pid);
-            }
-            PaneId::Plugin(_) => {}
+        pane_ids.iter().for_each(|&pane_id| {
+            self.write_to_pane_id(input_bytes.clone(), pane_id);
         });
     }
-    pub fn write_to_pane_id(&mut self, mut input_bytes: Vec<u8>, pid: RawFd) {
-        self.os_api
-            .write_to_tty_stdin(pid, &mut input_bytes)
-            .expect("failed to write to terminal");
-        self.os_api.tcdrain(pid).expect("failed to drain terminal");
-    }
     pub fn write_to_active_terminal(&mut self, input_bytes: Vec<u8>) {
-        match self.get_active_pane_id() {
-            Some(PaneId::Terminal(active_terminal_id)) => {
-                let active_terminal = self.get_active_pane().unwrap();
+        self.write_to_pane_id(input_bytes, self.get_active_pane_id().unwrap());
+    }
+    pub fn write_to_pane_id(&mut self, input_bytes: Vec<u8>, pane_id: PaneId) {
+        match pane_id {
+            PaneId::Terminal(active_terminal_id) => {
+                let active_terminal = self.panes.get(&pane_id).unwrap();
                 let mut adjusted_input = active_terminal.adjust_input_to_terminal(input_bytes);
                 self.os_api
                     .write_to_tty_stdin(active_terminal_id, &mut adjusted_input)
@@ -631,14 +621,13 @@ impl Tab {
                     .tcdrain(active_terminal_id)
                     .expect("failed to drain terminal");
             }
-            Some(PaneId::Plugin(pid)) => {
+            PaneId::Plugin(pid) => {
                 for key in parse_keys(&input_bytes) {
-                    self.send_plugin_instructions
-                        .send(PluginInstruction::Update(Some(pid), Event::KeyPress(key)))
+                    self.senders
+                        .send_to_plugin(PluginInstruction::Update(Some(pid), Event::KeyPress(key)))
                         .unwrap()
                 }
             }
-            _ => {}
         }
     }
     pub fn get_active_terminal_cursor_position(&self) -> Option<(usize, usize)> {
@@ -732,20 +721,16 @@ impl Tab {
         if self.panes_contain_widechar() {
             self.set_force_render()
         }
-        let mut stdout = self.os_api.get_stdout_writer();
+        let mut output = String::new();
         let mut boundaries = Boundaries::new(
             self.full_screen_ws.columns as u16,
             self.full_screen_ws.rows as u16,
         );
         let hide_cursor = "\u{1b}[?25l";
-        stdout
-            .write_all(&hide_cursor.as_bytes())
-            .expect("cannot write to stdout");
+        output.push_str(hide_cursor);
         if self.should_clear_display_before_rendering {
             let clear_display = "\u{1b}[2J";
-            stdout
-                .write_all(&clear_display.as_bytes())
-                .expect("cannot write to stdout");
+            output.push_str(clear_display);
             self.should_clear_display_before_rendering = false;
         }
         for (kind, pane) in self.panes.iter_mut() {
@@ -764,48 +749,39 @@ impl Tab {
                         adjust_to_size(&vte_output, pane.rows(), pane.columns())
                     };
                     // FIXME: Use Termion for cursor and style clearing?
-                    write!(
-                        stdout,
+                    output.push_str(&format!(
                         "\u{1b}[{};{}H\u{1b}[m{}",
                         pane.y() + 1,
                         pane.x() + 1,
                         vte_output
-                    )
-                    .expect("cannot write to stdout");
+                    ));
                 }
             }
         }
 
         // TODO: only render (and calculate) boundaries if there was a resize
-        let vte_output = boundaries.vte_output();
-        stdout
-            .write_all(&vte_output.as_bytes())
-            .expect("cannot write to stdout");
+        output.push_str(&boundaries.vte_output());
 
         match self.get_active_terminal_cursor_position() {
             Some((cursor_position_x, cursor_position_y)) => {
                 let show_cursor = "\u{1b}[?25h";
-                let goto_cursor_position = format!(
+                let goto_cursor_position = &format!(
                     "\u{1b}[{};{}H\u{1b}[m",
                     cursor_position_y + 1,
                     cursor_position_x + 1
                 ); // goto row/col
-                stdout
-                    .write_all(&show_cursor.as_bytes())
-                    .expect("cannot write to stdout");
-                stdout
-                    .write_all(&goto_cursor_position.as_bytes())
-                    .expect("cannot write to stdout");
-                stdout.flush().expect("could not flush");
+                output.push_str(show_cursor);
+                output.push_str(goto_cursor_position);
             }
             None => {
                 let hide_cursor = "\u{1b}[?25l";
-                stdout
-                    .write_all(&hide_cursor.as_bytes())
-                    .expect("cannot write to stdout");
-                stdout.flush().expect("could not flush");
+                output.push_str(hide_cursor);
             }
         }
+
+        self.senders
+            .send_to_server(ServerInstruction::Render(Some(output)))
+            .unwrap();
     }
     fn get_panes(&self) -> impl Iterator<Item = (&PaneId, &Box<dyn Pane>)> {
         self.panes.iter()
@@ -2108,8 +2084,8 @@ impl Tab {
         if let Some(max_panes) = self.max_panes {
             let terminals = self.get_pane_ids();
             for &pid in terminals.iter().skip(max_panes - 1) {
-                self.send_pty_instructions
-                    .send(PtyInstruction::ClosePane(pid))
+                self.senders
+                    .send_to_pty(PtyInstruction::ClosePane(pid))
                     .unwrap();
                 self.close_pane_without_rerender(pid);
             }
@@ -2223,8 +2199,8 @@ impl Tab {
     pub fn close_focused_pane(&mut self) {
         if let Some(active_pane_id) = self.get_active_pane_id() {
             self.close_pane(active_pane_id);
-            self.send_pty_instructions
-                .send(PtyInstruction::ClosePane(active_pane_id))
+            self.senders
+                .send_to_pty(PtyInstruction::ClosePane(active_pane_id))
                 .unwrap();
         }
     }

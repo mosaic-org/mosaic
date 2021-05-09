@@ -64,7 +64,7 @@ args = ["clippy", "--", "@@split(CARGO_MAKE_TASK_ARGS,;)"]
 # Release building and installing Zellij
 [tasks.install]
 workspace = false
-dependencies = ["build-plugins-release", "wasm-opt-plugins", "build-release"]
+dependencies = ["build-plugins-release", "wasm-opt-plugins", "build-release", "manpage"]
 script_runner = "@duckscript"
 script = '''
 if is_dir ${CARGO_MAKE_TASK_ARGS}
@@ -93,10 +93,24 @@ for plugin in ${plugins}
 end
 '''
 
+[tasks.manpage]
+workspace = false
+description = "Use mandown crate to create or update man entry from docs/MANPAGES.md"
+script = '''
+root_dir=${CARGO_MAKE_WORKSPACE_WORKING_DIRECTORY}
+mkdir -p ${root_dir}/assets/man
+mandown ${root_dir}/docs/MANPAGE.md ZELLIJ 1 > ${root_dir}/assets/man/zellij.1
+'''
+dependencies = ["install-mandown"]
+
+[tasks.install-mandown]
+command = "cargo"
+args = ["install", "mandown"]
+
 # CI Releasing Zellij
 [tasks.ci-build-release]
 workspace = false
-dependencies = ["setup-cross-compilation", "build-plugins-release", "wasm-opt-plugins"]
+dependencies = ["setup-cross-compilation", "build-plugins-release", "wasm-opt-plugins", "manpage"]
 command = "cross"
 args = ["build", "--verbose", "--release", "--target", "${CARGO_MAKE_TASK_ARGS}"]
 
@@ -108,7 +122,7 @@ args = ["install", "cross"]
 [tasks.publish]
 clear = true
 workspace = false
-dependencies = ["build-plugins-release", "wasm-opt-plugins", "build-release", "publish-zellij-tile", "publish-zellij-tile-extra"]
+dependencies = ["build-plugins-release", "wasm-opt-plugins", "build-release", "publish-zellij-tile", "publish-zellij-tile-utils"]
 run_task = "publish-zellij"
 
 [tasks.publish-zellij-tile]
@@ -117,12 +131,14 @@ cwd = "zellij-tile"
 command = "cargo"
 args = ["publish"]
 
-[tasks.publish-zellij-tile-extra]
+[tasks.publish-zellij-tile-utils]
 ignore_errors = true
-cwd = "zellij-tile-extra"
+cwd = "zellij-tile-utils"
 command = "cargo"
 args = ["publish"]
 
 [tasks.publish-zellij]
 command = "cargo"
 args = ["publish"]
+
+

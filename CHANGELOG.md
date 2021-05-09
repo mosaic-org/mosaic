@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 
 ## [Unreleased]
+* Add more functionality to unbinding the default keybindings (https://github.com/zellij-org/zellij/pull/468)
+* Terminal compatibility: fix support for CSI subparameters (https://github.com/zellij-org/zellij/pull/469)
+* Move the sync command to tab mode (https://github.com/zellij-org/zellij/pull/412)
+
+## [0.8.0] - 2021-05-07
+* Terminal compatibility: pass vttest 8 (https://github.com/zellij-org/zellij/pull/461)
+* Add a Manpage (https://github.com/zellij-org/zellij/pull/455)
+* Code infrastructure changes to support the upcoming session detach (https://github.com/zellij-org/zellij/pull/223)
+
+## [0.7.0] - 2021-05-04
 * Fix the tab '(Sync)' suffix in named tabs (https://github.com/zellij-org/zellij/pull/410)
 * Improve performance when multiple panes are open (https://github.com/zellij-org/zellij/pull/318)
 * Improve error reporting and tests of configuration (https://github.com/zellij-org/zellij/pull/423)
@@ -12,6 +22,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 * Add theme support through xrdb (https://github.com/zellij-org/zellij/pull/239)
 * Fix default keybindings in resize mode and add arrow parity in tab and scroll mode (https://github.com/zellij-org/zellij/pull/441)
 * Terminal compatibility: pass vttest 2 and 3 (https://github.com/zellij-org/zellij/pull/447)
+* Stabilize colors (https://github.com/zellij-org/zellij/pull/453)
 
 ## [0.6.0] - 2021-04-29
 * Doesn't quit anymore on single `q` press while in tab mode  (https://github.com/zellij-org/zellij/pull/342)

@@ -3,15 +3,16 @@
 use std::collections::BTreeMap;
 use std::os::unix::io::RawFd;
 use std::str;
-use std::sync::mpsc::Receiver;
 
-use super::{AppInstruction, SenderWithContext};
-use crate::os_input_output::OsApi;
+use crate::common::pty::{PtyInstruction, VteBytes};
+use crate::common::thread_bus::Bus;
+use crate::errors::{ContextType, ScreenContext};
+use crate::layout::Layout;
+use crate::panes::PaneId;
 use crate::panes::PositionAndSize;
-use crate::pty_bus::{PtyInstruction, VteBytes};
+use crate::server::ServerInstruction;
 use crate::tab::Tab;
-use crate::{errors::ErrorContext, wasm_vm::PluginInstruction};
-use crate::{layout::Layout, panes::PaneId};
+use crate::wasm_vm::PluginInstruction;
 
 use zellij_tile::data::{Event, InputMode, ModeInfo, Palette, TabInfo};
 
@@ -35,7 +36,7 @@ pub enum ScreenInstruction {
     MoveFocusDown,
     MoveFocusUp,
     MoveFocusRight,
-    Quit,
+    Exit,
     ScrollUp,
     ScrollDown,
     PageScrollUp,
@@ -47,70 +48,52 @@ pub enum ScreenInstruction {
     SetMaxHeight(PaneId, usize),
     SetInvisibleBorders(PaneId, bool),
     ClosePane(PaneId),
-    ApplyLayout((Layout, Vec<RawFd>)),
+    ApplyLayout(Layout, Vec<RawFd>),
     NewTab(RawFd),
     SwitchTabNext,
     SwitchTabPrev,
-    ToggleActiveSyncPanes,
+    ToggleActiveSyncTab,
     CloseTab,
     GoToTab(u32),
     UpdateTabName(Vec<u8>),
-    TerminalResize,
+    TerminalResize(PositionAndSize),
     ChangeMode(ModeInfo),
 }
 
 /// A [`Screen`] holds multiple [`Tab`]s, each one holding multiple [`panes`](crate::client::panes).
 /// It only directly controls which tab is active, delegating the rest to the individual `Tab`.
 pub struct Screen {
-    /// A [`ScreenInstruction`] and [`ErrorContext`] receiver.
-    pub receiver: Receiver<(ScreenInstruction, ErrorContext)>,
+    /// A Bus for sending and receiving messages with the other threads.
+    pub bus: Bus<ScreenInstruction>,
     /// An optional maximal amount of panes allowed per [`Tab`] in this [`Screen`] instance.
     max_panes: Option<usize>,
     /// A map between this [`Screen`]'s tabs and their ID/key.
     tabs: BTreeMap<usize, Tab>,
-    /// A [`PtyInstruction`] and [`ErrorContext`] sender.
-    pub send_pty_instructions: SenderWithContext<PtyInstruction>,
-    /// A [`PluginInstruction`] and [`ErrorContext`] sender.
-    pub send_plugin_instructions: SenderWithContext<PluginInstruction>,
-    /// An [`AppInstruction`] and [`ErrorContext`] sender.
-    pub send_app_instructions: SenderWithContext<AppInstruction>,
     /// The full size of this [`Screen`].
     full_screen_ws: PositionAndSize,
     /// The index of this [`Screen`]'s active [`Tab`].
     active_tab_index: Option<usize>,
-    /// The [`OsApi`] this [`Screen`] uses.
-    os_api: Box<dyn OsApi>,
     mode_info: ModeInfo,
     input_mode: InputMode,
     colors: Palette,
 }
 
 impl Screen {
-    // FIXME: This lint needs actual fixing! Maybe by bundling the Senders
     /// Creates and returns a new [`Screen`].
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
-        receive_screen_instructions: Receiver<(ScreenInstruction, ErrorContext)>,
-        send_pty_instructions: SenderWithContext<PtyInstruction>,
-        send_plugin_instructions: SenderWithContext<PluginInstruction>,
-        send_app_instructions: SenderWithContext<AppInstruction>,
+        bus: Bus<ScreenInstruction>,
         full_screen_ws: &PositionAndSize,
-        os_api: Box<dyn OsApi>,
         max_panes: Option<usize>,
         mode_info: ModeInfo,
         input_mode: InputMode,
         colors: Palette,
     ) -> Self {
         Screen {
-            receiver: receive_screen_instructions,
+            bus,
             max_panes,
-            send_pty_instructions,
-            send_plugin_instructions,
-            send_app_instructions,
             full_screen_ws: *full_screen_ws,
             active_tab_index: None,
             tabs: BTreeMap::new(),
-            os_api,
             mode_info,
             input_mode,
             colors,
@@ -127,10 +110,8 @@ impl Screen {
             position,
             String::new(),
             &self.full_screen_ws,
-            self.os_api.clone(),
-            self.send_pty_instructions.clone(),
-            self.send_plugin_instructions.clone(),
-            self.send_app_instructions.clone(),
+            self.bus.os_input.as_ref().unwrap().clone(),
+            self.bus.senders.clone(),
             self.max_panes,
             Some(PaneId::Terminal(pane_id)),
             self.mode_info.clone(),
@@ -214,13 +195,15 @@ impl Screen {
         // below we don't check the result of sending the CloseTab instruction to the pty thread
         // because this might be happening when the app is closing, at which point the pty thread
         // has already closed and this would result in an error
-        let _ = self
-            .send_pty_instructions
-            .send(PtyInstruction::CloseTab(pane_ids));
+        self.bus
+            .senders
+            .send_to_pty(PtyInstruction::CloseTab(pane_ids))
+            .unwrap();
         if self.tabs.is_empty() {
             self.active_tab_index = None;
-            self.send_app_instructions
-                .send(AppInstruction::Exit)
+            self.bus
+                .senders
+                .send_to_server(ServerInstruction::Render(None))
                 .unwrap();
         } else {
             for t in self.tabs.values_mut() {
@@ -232,8 +215,7 @@ impl Screen {
         }
     }
 
-    pub fn resize_to_screen(&mut self) {
-        let new_screen_size = self.os_api.get_terminal_size_using_fd(0);
+    pub fn resize_to_screen(&mut self, new_screen_size: PositionAndSize) {
         self.full_screen_ws = new_screen_size;
         for (_, tab) in self.tabs.iter_mut() {
             tab.resize_whole_tab(new_screen_size);
@@ -284,10 +266,8 @@ impl Screen {
             position,
             String::new(),
             &self.full_screen_ws,
-            self.os_api.clone(),
-            self.send_pty_instructions.clone(),
-            self.send_plugin_instructions.clone(),
-            self.send_app_instructions.clone(),
+            self.bus.os_input.as_ref().unwrap().clone(),
+            self.bus.senders.clone(),
             self.max_panes,
             None,
             self.mode_info.clone(),
@@ -313,8 +293,9 @@ impl Screen {
                 is_sync_panes_active: tab.is_sync_panes_active(),
             });
         }
-        self.send_plugin_instructions
-            .send(PluginInstruction::Update(None, Event::TabUpdate(tab_data)))
+        self.bus
+            .senders
+            .send_to_plugin(PluginInstruction::Update(None, Event::TabUpdate(tab_data)))
             .unwrap();
     }
 
@@ -339,6 +320,249 @@ impl Screen {
         self.mode_info = mode_info;
         for tab in self.tabs.values_mut() {
             tab.mode_info = self.mode_info.clone();
+        }
+    }
+}
+
+pub fn screen_thread_main(
+    bus: Bus<ScreenInstruction>,
+    max_panes: Option<usize>,
+    full_screen_ws: PositionAndSize,
+) {
+    let colors = bus.os_input.as_ref().unwrap().load_palette();
+    let mut screen = Screen::new(
+        bus,
+        &full_screen_ws,
+        max_panes,
+        ModeInfo {
+            palette: colors,
+            ..ModeInfo::default()
+        },
+        InputMode::Normal,
+        colors,
+    );
+    loop {
+        let (event, mut err_ctx) = screen
+            .bus
+            .recv()
+            .expect("failed to receive event on channel");
+        err_ctx.add_call(ContextType::Screen(ScreenContext::from(&event)));
+        match event {
+            ScreenInstruction::PtyBytes(pid, vte_bytes) => {
+                let active_tab = screen.get_active_tab_mut().unwrap();
+                if active_tab.has_terminal_pid(pid) {
+                    // it's most likely that this event is directed at the active tab
+                    // look there first
+                    active_tab.handle_pty_bytes(pid, vte_bytes);
+                } else {
+                    // if this event wasn't directed at the active tab, start looking
+                    // in other tabs
+                    let all_tabs = screen.get_tabs_mut();
+                    for tab in all_tabs.values_mut() {
+                        if tab.has_terminal_pid(pid) {
+                            tab.handle_pty_bytes(pid, vte_bytes);
+                            break;
+                        }
+                    }
+                }
+            }
+            ScreenInstruction::Render => {
+                screen.render();
+            }
+            ScreenInstruction::NewPane(pid) => {
+                screen.get_active_tab_mut().unwrap().new_pane(pid);
+                screen
+                    .bus
+                    .senders
+                    .send_to_server(ServerInstruction::UnblockInputThread)
+                    .unwrap();
+            }
+            ScreenInstruction::HorizontalSplit(pid) => {
+                screen.get_active_tab_mut().unwrap().horizontal_split(pid);
+                screen
+                    .bus
+                    .senders
+                    .send_to_server(ServerInstruction::UnblockInputThread)
+                    .unwrap();
+            }
+            ScreenInstruction::VerticalSplit(pid) => {
+                screen.get_active_tab_mut().unwrap().vertical_split(pid);
+                screen
+                    .bus
+                    .senders
+                    .send_to_server(ServerInstruction::UnblockInputThread)
+                    .unwrap();
+            }
+            ScreenInstruction::WriteCharacter(bytes) => {
+                let active_tab = screen.get_active_tab_mut().unwrap();
+                match active_tab.is_sync_panes_active() {
+                    true => active_tab.write_to_terminals_on_current_tab(bytes),
+                    false => active_tab.write_to_active_terminal(bytes),
+                }
+            }
+            ScreenInstruction::ResizeLeft => {
+                screen.get_active_tab_mut().unwrap().resize_left();
+            }
+            ScreenInstruction::ResizeRight => {
+                screen.get_active_tab_mut().unwrap().resize_right();
+            }
+            ScreenInstruction::ResizeDown => {
+                screen.get_active_tab_mut().unwrap().resize_down();
+            }
+            ScreenInstruction::ResizeUp => {
+                screen.get_active_tab_mut().unwrap().resize_up();
+            }
+            ScreenInstruction::SwitchFocus => {
+                screen.get_active_tab_mut().unwrap().move_focus();
+            }
+            ScreenInstruction::FocusNextPane => {
+                screen.get_active_tab_mut().unwrap().focus_next_pane();
+            }
+            ScreenInstruction::FocusPreviousPane => {
+                screen.get_active_tab_mut().unwrap().focus_previous_pane();
+            }
+            ScreenInstruction::MoveFocusLeft => {
+                screen.get_active_tab_mut().unwrap().move_focus_left();
+            }
+            ScreenInstruction::MoveFocusDown => {
+                screen.get_active_tab_mut().unwrap().move_focus_down();
+            }
+            ScreenInstruction::MoveFocusRight => {
+                screen.get_active_tab_mut().unwrap().move_focus_right();
+            }
+            ScreenInstruction::MoveFocusUp => {
+                screen.get_active_tab_mut().unwrap().move_focus_up();
+            }
+            ScreenInstruction::ScrollUp => {
+                screen
+                    .get_active_tab_mut()
+                    .unwrap()
+                    .scroll_active_terminal_up();
+            }
+            ScreenInstruction::ScrollDown => {
+                screen
+                    .get_active_tab_mut()
+                    .unwrap()
+                    .scroll_active_terminal_down();
+            }
+            ScreenInstruction::PageScrollUp => {
+                screen
+                    .get_active_tab_mut()
+                    .unwrap()
+                    .scroll_active_terminal_up_page();
+            }
+            ScreenInstruction::PageScrollDown => {
+                screen
+                    .get_active_tab_mut()
+                    .unwrap()
+                    .scroll_active_terminal_down_page();
+            }
+            ScreenInstruction::ClearScroll => {
+                screen
+                    .get_active_tab_mut()
+                    .unwrap()
+                    .clear_active_terminal_scroll();
+            }
+            ScreenInstruction::CloseFocusedPane => {
+                screen.get_active_tab_mut().unwrap().close_focused_pane();
+                screen.render();
+            }
+            ScreenInstruction::SetSelectable(id, selectable) => {
+                screen
+                    .get_active_tab_mut()
+                    .unwrap()
+                    .set_pane_selectable(id, selectable);
+            }
+            ScreenInstruction::SetMaxHeight(id, max_height) => {
+                screen
+                    .get_active_tab_mut()
+                    .unwrap()
+                    .set_pane_max_height(id, max_height);
+            }
+            ScreenInstruction::SetInvisibleBorders(id, invisible_borders) => {
+                screen
+                    .get_active_tab_mut()
+                    .unwrap()
+                    .set_pane_invisible_borders(id, invisible_borders);
+                screen.render();
+            }
+            ScreenInstruction::ClosePane(id) => {
+                screen.get_active_tab_mut().unwrap().close_pane(id);
+                screen.render();
+            }
+            ScreenInstruction::ToggleActiveTerminalFullscreen => {
+                screen
+                    .get_active_tab_mut()
+                    .unwrap()
+                    .toggle_active_pane_fullscreen();
+            }
+            ScreenInstruction::NewTab(pane_id) => {
+                screen.new_tab(pane_id);
+                screen
+                    .bus
+                    .senders
+                    .send_to_server(ServerInstruction::UnblockInputThread)
+                    .unwrap();
+            }
+            ScreenInstruction::SwitchTabNext => {
+                screen.switch_tab_next();
+                screen
+                    .bus
+                    .senders
+                    .send_to_server(ServerInstruction::UnblockInputThread)
+                    .unwrap();
+            }
+            ScreenInstruction::SwitchTabPrev => {
+                screen.switch_tab_prev();
+                screen
+                    .bus
+                    .senders
+                    .send_to_server(ServerInstruction::UnblockInputThread)
+                    .unwrap();
+            }
+            ScreenInstruction::CloseTab => {
+                screen.close_tab();
+                screen
+                    .bus
+                    .senders
+                    .send_to_server(ServerInstruction::UnblockInputThread)
+                    .unwrap();
+            }
+            ScreenInstruction::ApplyLayout(layout, new_pane_pids) => {
+                screen.apply_layout(layout, new_pane_pids);
+                screen
+                    .bus
+                    .senders
+                    .send_to_server(ServerInstruction::UnblockInputThread)
+                    .unwrap();
+            }
+            ScreenInstruction::GoToTab(tab_index) => {
+                screen.go_to_tab(tab_index as usize);
+                screen
+                    .bus
+                    .senders
+                    .send_to_server(ServerInstruction::UnblockInputThread)
+                    .unwrap();
+            }
+            ScreenInstruction::UpdateTabName(c) => {
+                screen.update_active_tab_name(c);
+            }
+            ScreenInstruction::TerminalResize(new_size) => {
+                screen.resize_to_screen(new_size);
+            }
+            ScreenInstruction::ChangeMode(mode_info) => {
+                screen.change_mode(mode_info);
+            }
+            ScreenInstruction::ToggleActiveSyncTab => {
+                screen
+                    .get_active_tab_mut()
+                    .unwrap()
+                    .toggle_sync_panes_is_active();
+                screen.update_tabs();
+            }
+            ScreenInstruction::Exit => {
+                break;
+            }
         }
     }
 }

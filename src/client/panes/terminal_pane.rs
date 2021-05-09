@@ -1,16 +1,18 @@
-use crate::tab::Pane;
-use ::nix::pty::Winsize;
-use ::std::os::unix::io::RawFd;
 use std::fmt::Debug;
+use std::os::unix::io::RawFd;
 use std::time::Instant;
+
+use nix::pty::Winsize;
+use serde::{Deserialize, Serialize};
 
 use crate::panes::grid::Grid;
 use crate::panes::terminal_character::{
     CharacterStyles, TerminalCharacter, EMPTY_TERMINAL_CHARACTER,
 };
-use crate::pty_bus::VteBytes;
+use crate::pty::VteBytes;
+use crate::tab::Pane;
 
-#[derive(PartialEq, Eq, Ord, PartialOrd, Hash, Clone, Copy, Debug)]
+#[derive(PartialEq, Eq, Ord, PartialOrd, Hash, Clone, Copy, Debug, Serialize, Deserialize)]
 pub enum PaneId {
     Terminal(RawFd),
     Plugin(u32), // FIXME: Drop the trait object, make this a wrapper for the struct?
@@ -18,7 +20,7 @@ pub enum PaneId {
 
 /// Contains the position and size of a [`Pane`], or more generally of any terminal, measured
 /// in character rows and columns.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
 pub struct PositionAndSize {
     pub x: usize,
     pub y: usize,
