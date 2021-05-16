@@ -87,7 +87,7 @@ for plugin in ${plugins}
     mkdir ${CARGO_MAKE_WORKSPACE_WORKING_DIRECTORY}/assets/plugins/
     plugin_name = basename ${plugin}
     plugin_out = set ${CARGO_MAKE_WORKSPACE_WORKING_DIRECTORY}/assets/plugins/${plugin_name}
-    if not is_path_exists ${plugin_out} or is_path_newer ${plugin} ${plugin_out}
+    if is_path_newer ${plugin} ${plugin_out} or not is_path_exists ${plugin_out}
         exec wasm-opt -O ${plugin} -o ${plugin_out}
     end
 end
@@ -122,8 +122,21 @@ args = ["install", "cross"]
 [tasks.publish]
 clear = true
 workspace = false
-dependencies = ["build-plugins-release", "wasm-opt-plugins", "build-release", "publish-zellij-tile", "publish-zellij-tile-utils"]
+dependencies = ["build-plugins-release", "wasm-opt-plugins", "release-commit", "build-release", "publish-zellij-tile", "publish-zellij-tile-utils"]
 run_task = "publish-zellij"
+
+[tasks.release-commit]
+dependencies = ["commit-all", "tag-release"]
+command = "git"
+args = ["push", "--atomic", "origin", "main", "v${CARGO_MAKE_CRATE_VERSION}"]
+
+[tasks.commit-all]
+command = "git"
+args = ["commit", "-aem", "chore(release): v${CARGO_MAKE_CRATE_VERSION}"]
+
+[tasks.tag-release]
+command = "git"
+args = ["tag", "v${CARGO_MAKE_CRATE_VERSION}"]
 
 [tasks.publish-zellij-tile]
 ignore_errors = true

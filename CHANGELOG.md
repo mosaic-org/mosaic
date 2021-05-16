@@ -5,9 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 
 ## [Unreleased]
+* Remove unused imports (https://github.com/zellij-org/zellij/pull/504)
+* More Infrastructure changes for the upcoming session detach feature: run server and client in separate processes (https://github.com/zellij-org/zellij/pull/499)
+
+## [0.11.0] - 2021-05-15
+
+This version is mostly an installation hotfix.
+
+* Add `check` flag to `setup` subcommand, move `generate-completions` subcommand to `setup` flag (https://github.com/zellij-org/zellij/pull/503)
+* Change the asset installation from an opt-in to an opt-out (https://github.com/zellij-org/zellij/pull/512)
+
+## [0.10.0] - 2021-05-14
+* Change Switch default config loading order of `HOME` and system (https://github.com/zellij-org/zellij/pull/488)
+* Add support for requesting a simpler layout from plugins, move `clean` flag from `options` to `setup` (https://github.com/zellij-org/zellij/pull/479)
+* Improve config loading slightly (https://github.com/zellij-org/zellij/pull/492)
+* Terminal compatibility: preserve current style when clearing viewport (https://github.com/zellij-org/zellij/pull/493)
+* Fix propagation of plugin ui request (https://github.com/zellij-org/zellij/pull/495)
+* Handle pasted text properly (https://github.com/zellij-org/zellij/pull/494)
+* Fix default keybinds for tab -> resize mode (https://github.com/zellij-org/zellij/pull/497)
+* Terminal compatibility: device reports (https://github.com/zellij-org/zellij/pull/500)
+* Forward unknown keys to the active terminal (https://github.com/zellij-org/zellij/pull/501)
+
+## [0.9.0] - 2021-05-11
 * Add more functionality to unbinding the default keybindings (https://github.com/zellij-org/zellij/pull/468)
 * Terminal compatibility: fix support for CSI subparameters (https://github.com/zellij-org/zellij/pull/469)
 * Move the sync command to tab mode (https://github.com/zellij-org/zellij/pull/412)
+* Fix exit code of `dump-default-config` (https://github.com/zellij-org/zellij/pull/480)
+* Feature: Switch tabs using `Alt + h/l` in normal mode if there are no panes in the direction (https://github.com/zellij-org/zellij/pull/471) 
+* Terminal Compatibility: various behaviour fixes (https://github.com/zellij-org/zellij/pull/486)
+* Fix handling of `$HOME` `config` directory, especially relevant for darwin systems (https://github.com/zellij-org/zellij/pull/487)
 
 ## [0.8.0] - 2021-05-07
 * Terminal compatibility: pass vttest 8 (https://github.com/zellij-org/zellij/pull/461)

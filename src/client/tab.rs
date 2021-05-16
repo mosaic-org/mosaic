@@ -132,6 +132,9 @@ pub trait Pane {
     fn clear_scroll(&mut self);
     fn active_at(&self) -> Instant;
     fn set_active_at(&mut self, instant: Instant);
+    fn cursor_shape_csi(&self) -> String {
+        "\u{1b}[0 q".to_string() // default to non blinking block
+    }
 
     fn right_boundary_x_coords(&self) -> usize {
         self.x() + self.columns()
@@ -214,6 +217,11 @@ pub trait Pane {
     }
     fn invisible_borders(&self) -> bool {
         false
+    }
+    fn drain_messages_to_pty(&mut self) -> Vec<Vec<u8>> {
+        // TODO: this is only relevant to terminal panes
+        // we should probably refactor away from this trait at some point
+        vec![]
     }
 }
 
@@ -598,6 +606,10 @@ impl Tab {
         // the reason
         if let Some(terminal_output) = self.panes.get_mut(&PaneId::Terminal(pid)) {
             terminal_output.handle_pty_bytes(bytes);
+            let messages_to_pty = terminal_output.drain_messages_to_pty();
+            for message in messages_to_pty {
+                self.write_to_pane_id(message, PaneId::Terminal(pid));
+            }
         }
     }
     pub fn write_to_terminals_on_current_tab(&mut self, input_bytes: Vec<u8>) {
@@ -765,10 +777,12 @@ impl Tab {
         match self.get_active_terminal_cursor_position() {
             Some((cursor_position_x, cursor_position_y)) => {
                 let show_cursor = "\u{1b}[?25h";
+                let change_cursor_shape = self.get_active_pane().unwrap().cursor_shape_csi();
                 let goto_cursor_position = &format!(
-                    "\u{1b}[{};{}H\u{1b}[m",
+                    "\u{1b}[{};{}H\u{1b}[m{}",
                     cursor_position_y + 1,
-                    cursor_position_x + 1
+                    cursor_position_x + 1,
+                    change_cursor_shape
                 ); // goto row/col
                 output.push_str(show_cursor);
                 output.push_str(goto_cursor_position);
@@ -1851,12 +1865,13 @@ impl Tab {
         }
         self.render();
     }
-    pub fn move_focus_left(&mut self) {
+    // returns a boolean that indicates whether the focus moved
+    pub fn move_focus_left(&mut self) -> bool {
         if !self.has_selectable_panes() {
-            return;
+            return false;
         }
         if self.fullscreen_is_active {
-            return;
+            return false;
         }
         let active_terminal = self.get_active_pane();
         if let Some(active) = active_terminal {
@@ -1871,6 +1886,8 @@ impl Tab {
             match next_index {
                 Some(&p) => {
                     self.active_terminal = Some(p);
+                    self.render();
+                    return true;
                 }
                 None => {
                     self.active_terminal = Some(active.pid());
@@ -1879,7 +1896,7 @@ impl Tab {
         } else {
             self.active_terminal = Some(active_terminal.unwrap().pid());
         }
-        self.render();
+        false
     }
     pub fn move_focus_down(&mut self) {
         if !self.has_selectable_panes() {
@@ -1941,12 +1958,13 @@ impl Tab {
         }
         self.render();
     }
-    pub fn move_focus_right(&mut self) {
+    // returns a boolean that indicates whether the focus moved
+    pub fn move_focus_right(&mut self) -> bool {
         if !self.has_selectable_panes() {
-            return;
+            return false;
         }
         if self.fullscreen_is_active {
-            return;
+            return false;
         }
         let active_terminal = self.get_active_pane();
         if let Some(active) = active_terminal {
@@ -1961,6 +1979,8 @@ impl Tab {
             match next_index {
                 Some(&p) => {
                     self.active_terminal = Some(p);
+                    self.render();
+                    return true;
                 }
                 None => {
                     self.active_terminal = Some(active.pid());
@@ -1969,7 +1989,7 @@ impl Tab {
         } else {
             self.active_terminal = Some(active_terminal.unwrap().pid());
         }
-        self.render();
+        false
     }
     fn horizontal_borders(&self, terminals: &[PaneId]) -> HashSet<usize> {
         terminals.iter().fold(HashSet::new(), |mut borders, t| {

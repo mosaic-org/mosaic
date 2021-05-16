@@ -11,8 +11,16 @@ pub const ZELLIJ_CONFIG_FILE_ENV: &str = "ZELLIJ_CONFIG_FILE";
 pub const ZELLIJ_CONFIG_DIR_ENV: &str = "ZELLIJ_CONFIG_DIR";
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-// TODO: ${PREFIX} argument in makefile
 pub const SYSTEM_DEFAULT_CONFIG_DIR: &str = "/etc/zellij";
+pub const SYSTEM_DEFAULT_DATA_DIR_PREFIX: &str = system_default_data_dir();
+
+const fn system_default_data_dir() -> &'static str {
+    if let Some(data_dir) = std::option_env!("PREFIX") {
+        data_dir
+    } else {
+        &"/usr"
+    }
+}
 
 lazy_static! {
     static ref UID: Uid = Uid::current();
@@ -39,3 +47,8 @@ lazy_static! {
     pub static ref ZELLIJ_TMP_LOG_DIR: PathBuf = ZELLIJ_TMP_DIR.join("zellij-log");
     pub static ref ZELLIJ_TMP_LOG_FILE: PathBuf = ZELLIJ_TMP_LOG_DIR.join("log.txt");
 }
+
+pub const FEATURES: &[&str] = &[
+    #[cfg(feature = "disable_automatic_asset_installation")]
+    "disable_automatic_asset_installation",
+];

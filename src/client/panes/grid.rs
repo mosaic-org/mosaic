@@ -9,10 +9,12 @@ use vte::{Params, Perform};
 const TABSTOP_WIDTH: usize = 8; // TODO: is this always right?
 const SCROLL_BACK: usize = 10_000;
 
+use crate::utils::consts::VERSION;
 use crate::utils::logging::debug_log_to_file;
+use crate::utils::shared::version_number;
 
 use crate::panes::terminal_character::{
-    CharacterStyles, CharsetIndex, Cursor, StandardCharset, TerminalCharacter,
+    CharacterStyles, CharsetIndex, Cursor, CursorShape, StandardCharset, TerminalCharacter,
     EMPTY_TERMINAL_CHARACTER,
 };
 
@@ -177,6 +179,7 @@ pub struct Grid {
     saved_cursor_position: Option<Cursor>,
     scroll_region: Option<(usize, usize)>,
     active_charset: CharsetIndex,
+    preceding_char: Option<TerminalCharacter>,
     pub should_render: bool,
     pub cursor_key_mode: bool, // DECCKM - when set, cursor keys should send ANSI direction codes (eg. "OD") instead of the arrow keys (eg. "[D")
     pub erasure_mode: bool,    // ERM
@@ -185,6 +188,7 @@ pub struct Grid {
     pub clear_viewport_before_rendering: bool,
     pub width: usize,
     pub height: usize,
+    pub pending_messages_to_pty: Vec<Vec<u8>>,
 }
 
 impl Debug for Grid {
@@ -210,6 +214,7 @@ impl Grid {
             cursor: Cursor::new(0, 0),
             saved_cursor_position: None,
             scroll_region: None,
+            preceding_char: None,
             width: columns,
             height: rows,
             should_render: true,
@@ -220,6 +225,7 @@ impl Grid {
             alternative_lines_above_viewport_and_cursor: None,
             clear_viewport_before_rendering: false,
             active_charset: Default::default(),
+            pending_messages_to_pty: vec![],
         }
     }
     pub fn contains_widechar(&self) -> bool {
@@ -244,6 +250,26 @@ impl Grid {
         let mut empty_character = EMPTY_TERMINAL_CHARACTER;
         empty_character.styles = styles;
         self.pad_current_line_until(self.cursor.x);
+    }
+    pub fn move_to_previous_tabstop(&mut self) {
+        let mut previous_tabstop = None;
+        for tabstop in self.horizontal_tabstops.iter() {
+            if *tabstop >= self.cursor.x {
+                break;
+            }
+            previous_tabstop = Some(tabstop);
+        }
+        match previous_tabstop {
+            Some(tabstop) => {
+                self.cursor.x = *tabstop;
+            }
+            None => {
+                self.cursor.x = 0;
+            }
+        }
+    }
+    pub fn cursor_shape(&self) -> CursorShape {
+        self.cursor.get_shape()
     }
     fn set_horizontal_tabstop(&mut self) {
         self.horizontal_tabstops.insert(self.cursor.x);
@@ -925,6 +951,10 @@ impl Grid {
         self.active_charset = Default::default();
         self.erasure_mode = false;
         self.disable_linewrap = false;
+        self.cursor.change_shape(CursorShape::Block);
+    }
+    fn set_preceding_character(&mut self, terminal_character: TerminalCharacter) {
+        self.preceding_char = Some(terminal_character);
     }
 }
 
@@ -937,6 +967,7 @@ impl Perform for Grid {
             character: c,
             styles: self.cursor.pending_styles,
         };
+        self.set_preceding_character(terminal_character);
         self.add_character(terminal_character);
     }
 
@@ -950,9 +981,10 @@ impl Perform for Grid {
                 // tab
                 self.advance_to_next_tabstop(self.cursor.pending_styles);
             }
-            10 | 11 => {
+            10 | 11 | 12 => {
                 // 0a, newline
                 // 0b, vertical tabulation
+                // 0c, form feed
                 self.add_newline();
             }
             13 => {
@@ -985,7 +1017,7 @@ impl Perform for Grid {
         // TBD
     }
 
-    fn csi_dispatch(&mut self, params: &Params, _intermediates: &[u8], _ignore: bool, c: char) {
+    fn csi_dispatch(&mut self, params: &Params, intermediates: &[u8], _ignore: bool, c: char) {
         let mut params_iter = params.iter();
         let mut next_param_or = |default: u16| {
             params_iter
@@ -998,7 +1030,7 @@ impl Perform for Grid {
             self.cursor
                 .pending_styles
                 .add_style_from_ansi_params(&mut params_iter);
-        } else if c == 'C' {
+        } else if c == 'C' || c == 'a' {
             // move cursor forward
             let move_by = next_param_or(1);
             self.move_cursor_forward_until_edge(move_by);
@@ -1028,10 +1060,9 @@ impl Perform for Grid {
                 } else if clear_type == 1 {
                     self.clear_all_before_cursor(char_to_replace);
                 } else if clear_type == 2 {
-                    self.clear_all(char_to_replace);
+                    self.fill_viewport(char_to_replace);
                 }
             };
-        // TODO: implement 1
         } else if c == 'H' || c == 'f' {
             // goto row/col
             // we subtract 1 from the row/column because these are 1 indexed
@@ -1043,7 +1074,7 @@ impl Perform for Grid {
             // move cursor up until edge of screen
             let move_up_count = next_param_or(1);
             self.move_cursor_up(move_up_count as usize);
-        } else if c == 'B' {
+        } else if c == 'B' || c == 'e' {
             // move cursor down until edge of screen
             let move_down_count = next_param_or(1);
             let pad_character = EMPTY_TERMINAL_CHARACTER;
@@ -1052,7 +1083,7 @@ impl Perform for Grid {
             let move_back_count = next_param_or(1);
             self.move_cursor_back(move_back_count);
         } else if c == 'l' {
-            let first_intermediate_is_questionmark = match _intermediates.get(0) {
+            let first_intermediate_is_questionmark = match intermediates.get(0) {
                 Some(b'?') => true,
                 None => false,
                 _ => false,
@@ -1101,7 +1132,7 @@ impl Perform for Grid {
                 self.insert_mode = false;
             }
         } else if c == 'h' {
-            let first_intermediate_is_questionmark = match _intermediates.get(0) {
+            let first_intermediate_is_questionmark = match intermediates.get(0) {
                 Some(b'?') => true,
                 None => false,
                 _ => false,
@@ -1171,7 +1202,7 @@ impl Perform for Grid {
             let line_count_to_add = next_param_or(1);
             let pad_character = EMPTY_TERMINAL_CHARACTER;
             self.add_empty_lines_in_scroll_region(line_count_to_add, pad_character);
-        } else if c == 'G' {
+        } else if c == 'G' || c == '`' {
             let column = next_param_or(1).saturating_sub(1);
             self.move_cursor_to_column(column);
         } else if c == 'g' {
@@ -1215,6 +1246,104 @@ impl Perform for Grid {
             for _ in 0..count {
                 // TODO: should this be styled?
                 self.insert_character_at_cursor_position(EMPTY_TERMINAL_CHARACTER);
+            }
+        } else if c == 'b' {
+            if let Some(c) = self.preceding_char {
+                for _ in 0..next_param_or(1) {
+                    self.add_character(c);
+                }
+            }
+        } else if c == 'E' {
+            let count = next_param_or(1);
+            let pad_character = EMPTY_TERMINAL_CHARACTER;
+            self.move_cursor_down(count, pad_character);
+        } else if c == 'F' {
+            let count = next_param_or(1);
+            self.move_cursor_up(count);
+            self.move_cursor_to_beginning_of_line();
+        } else if c == 'I' {
+            for _ in 0..next_param_or(1) {
+                self.advance_to_next_tabstop(self.cursor.pending_styles);
+            }
+        } else if c == 'q' {
+            let first_intermediate_is_space = matches!(intermediates.get(0), Some(b' '));
+            if first_intermediate_is_space {
+                // DECSCUSR (CSI Ps SP q) -- Set Cursor Style.
+                let cursor_style_id = next_param_or(0);
+                let shape = match cursor_style_id {
+                    0 | 2 => Some(CursorShape::Block),
+                    1 => Some(CursorShape::BlinkingBlock),
+                    3 => Some(CursorShape::BlinkingUnderline),
+                    4 => Some(CursorShape::Underline),
+                    5 => Some(CursorShape::BlinkingBeam),
+                    6 => Some(CursorShape::Beam),
+                    _ => None,
+                };
+                if let Some(cursor_shape) = shape {
+                    self.cursor.change_shape(cursor_shape);
+                }
+            }
+        } else if c == 'Z' {
+            for _ in 0..next_param_or(1) {
+                self.move_to_previous_tabstop();
+            }
+        } else if c == 'c' {
+            // identify terminal
+            // https://vt100.net/docs/vt510-rm/DA1.html
+            match intermediates.get(0) {
+                None | Some(0) => {
+                    // primary device attributes
+                    let terminal_capabilities = "\u{1b}[?6c";
+                    self.pending_messages_to_pty
+                        .push(terminal_capabilities.as_bytes().to_vec());
+                }
+                Some(b'>') => {
+                    // secondary device attributes
+                    let version = version_number(VERSION);
+                    let text = format!("\u{1b}[>0;{};1c", version);
+                    self.pending_messages_to_pty.push(text.as_bytes().to_vec());
+                }
+                _ => {}
+            }
+        } else if c == 'n' {
+            // DSR - device status report
+            // https://vt100.net/docs/vt510-rm/DSR.html
+            match next_param_or(0) {
+                5 => {
+                    // report terminal status
+                    let all_good = "\u{1b}[0n";
+                    self.pending_messages_to_pty
+                        .push(all_good.as_bytes().to_vec());
+                }
+                6 => {
+                    // CPR - cursor position report
+                    let position_report =
+                        format!("\x1b[{};{}R", self.cursor.y + 1, self.cursor.x + 1);
+                    self.pending_messages_to_pty
+                        .push(position_report.as_bytes().to_vec());
+                }
+                _ => {}
+            }
+        } else if c == 't' {
+            match next_param_or(1) as usize {
+                14 => {
+                    // TODO: report text area size in pixels, currently unimplemented
+                    // to solve this we probably need to query the user's terminal for the cursor
+                    // size and then use it as a multiplier
+                }
+                18 => {
+                    // report text area
+                    let text_area_report = format!("\x1b[8;{};{}t", self.height, self.width);
+                    self.pending_messages_to_pty
+                        .push(text_area_report.as_bytes().to_vec());
+                }
+                22 => {
+                    // TODO: push title
+                }
+                23 => {
+                    // TODO: pop title
+                }
+                _ => {}
             }
         } else {
             let result = debug_log_to_file(format!("Unhandled csi: {}->{:?}", c, params));
@@ -1262,6 +1391,7 @@ impl Perform for Grid {
                 self.move_cursor_to_beginning_of_line();
             }
             (b'M', None) => {
+                // TODO: if cursor is at the top, it should go down one
                 self.move_cursor_up_with_scrolling(1);
             }
             (b'c', None) => {
@@ -1272,6 +1402,11 @@ impl Perform for Grid {
             }
             (b'7', None) => {
                 self.save_cursor_position();
+            }
+            (b'Z', None) => {
+                let terminal_capabilities = "\u{1b}[?6c";
+                self.pending_messages_to_pty
+                    .push(terminal_capabilities.as_bytes().to_vec());
             }
             (b'8', None) => {
                 self.restore_cursor_position();

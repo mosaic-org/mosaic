@@ -4,9 +4,10 @@ use std::collections::BTreeMap;
 use std::os::unix::io::RawFd;
 use std::str;
 
+use crate::common::input::options::Options;
 use crate::common::pty::{PtyInstruction, VteBytes};
 use crate::common::thread_bus::Bus;
-use crate::errors::{ContextType, ScreenContext};
+use crate::errors::ContextType;
 use crate::layout::Layout;
 use crate::panes::PaneId;
 use crate::panes::PositionAndSize;
@@ -14,7 +15,7 @@ use crate::server::ServerInstruction;
 use crate::tab::Tab;
 use crate::wasm_vm::PluginInstruction;
 
-use zellij_tile::data::{Event, InputMode, ModeInfo, Palette, TabInfo};
+use zellij_tile::data::{Event, InputMode, ModeInfo, Palette, PluginCapabilities, TabInfo};
 
 /// Instructions that can be sent to the [`Screen`].
 #[derive(Debug, Clone)]
@@ -33,9 +34,11 @@ pub enum ScreenInstruction {
     FocusNextPane,
     FocusPreviousPane,
     MoveFocusLeft,
+    MoveFocusLeftOrPreviousTab,
     MoveFocusDown,
     MoveFocusUp,
     MoveFocusRight,
+    MoveFocusRightOrNextTab,
     Exit,
     ScrollUp,
     ScrollDown,
@@ -328,14 +331,20 @@ pub fn screen_thread_main(
     bus: Bus<ScreenInstruction>,
     max_panes: Option<usize>,
     full_screen_ws: PositionAndSize,
+    config_options: Options,
 ) {
     let colors = bus.os_input.as_ref().unwrap().load_palette();
+    let capabilities = config_options.simplified_ui;
+
     let mut screen = Screen::new(
         bus,
         &full_screen_ws,
         max_panes,
         ModeInfo {
             palette: colors,
+            capabilities: PluginCapabilities {
+                arrow_fonts: capabilities,
+            },
             ..ModeInfo::default()
         },
         InputMode::Normal,
@@ -346,7 +355,7 @@ pub fn screen_thread_main(
             .bus
             .recv()
             .expect("failed to receive event on channel");
-        err_ctx.add_call(ContextType::Screen(ScreenContext::from(&event)));
+        err_ctx.add_call(ContextType::Screen((&event).into()));
         match event {
             ScreenInstruction::PtyBytes(pid, vte_bytes) => {
                 let active_tab = screen.get_active_tab_mut().unwrap();
@@ -424,11 +433,31 @@ pub fn screen_thread_main(
             ScreenInstruction::MoveFocusLeft => {
                 screen.get_active_tab_mut().unwrap().move_focus_left();
             }
+            ScreenInstruction::MoveFocusLeftOrPreviousTab => {
+                if !screen.get_active_tab_mut().unwrap().move_focus_left() {
+                    screen.switch_tab_prev();
+                }
+                screen
+                    .bus
+                    .senders
+                    .send_to_server(ServerInstruction::UnblockInputThread)
+                    .unwrap();
+            }
             ScreenInstruction::MoveFocusDown => {
                 screen.get_active_tab_mut().unwrap().move_focus_down();
             }
             ScreenInstruction::MoveFocusRight => {
                 screen.get_active_tab_mut().unwrap().move_focus_right();
+            }
+            ScreenInstruction::MoveFocusRightOrNextTab => {
+                if !screen.get_active_tab_mut().unwrap().move_focus_right() {
+                    screen.switch_tab_next();
+                }
+                screen
+                    .bus
+                    .senders
+                    .send_to_server(ServerInstruction::UnblockInputThread)
+                    .unwrap();
             }
             ScreenInstruction::MoveFocusUp => {
                 screen.get_active_tab_mut().unwrap().move_focus_up();
