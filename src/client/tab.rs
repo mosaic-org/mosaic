@@ -702,6 +702,9 @@ impl Tab {
             self.toggle_fullscreen_is_active();
         }
     }
+    pub fn is_fullscreen_active(&self) -> bool {
+        self.fullscreen_is_active
+    }
     pub fn toggle_fullscreen_is_active(&mut self) {
         self.fullscreen_is_active = !self.fullscreen_is_active;
     }
@@ -2110,6 +2113,9 @@ impl Tab {
     }
     pub fn get_pane_ids(&self) -> Vec<PaneId> {
         self.get_panes().map(|(&pid, _)| pid).collect()
+    }
+    pub fn get_pane_num(&self) -> usize {
+        self.get_pane_ids().len()
     }
     pub fn set_pane_selectable(&mut self, id: PaneId, selectable: bool) {
         if let Some(pane) = self.panes.get_mut(&id) {

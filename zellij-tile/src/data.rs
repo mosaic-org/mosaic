@@ -133,7 +133,9 @@ pub struct TabInfo {
     /* subset of fields to publish to plugins */
     pub position: usize,
     pub name: String,
+    pub panes: usize,
     pub active: bool,
+    pub is_fullscreen_active: bool,
     pub is_sync_panes_active: bool,
 }
 

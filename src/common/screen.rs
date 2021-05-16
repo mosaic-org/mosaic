@@ -290,7 +290,9 @@ impl Screen {
             tab_data.push(TabInfo {
                 position: tab.position,
                 name: tab.name.clone(),
+                panes: tab.get_pane_num(),
                 active: active_tab_index == tab.index,
+                is_fullscreen_active: tab.is_fullscreen_active(),
                 is_sync_panes_active: tab.is_sync_panes_active(),
             });
         }
