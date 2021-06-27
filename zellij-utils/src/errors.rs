@@ -187,6 +187,8 @@ pub enum ScreenContext {
     ResizeRight,
     ResizeDown,
     ResizeUp,
+    ResizeIncrease,
+    ResizeDecrease,
     SwitchFocus,
     FocusNextPane,
     FocusPreviousPane,
