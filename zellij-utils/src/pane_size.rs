@@ -5,25 +5,52 @@ use crate::position::Position;
 
 /// Contains the position and size of a [`Pane`], or more generally of any terminal, measured
 /// in character rows and columns.
-#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct PositionAndSize {
     pub x: usize,
     pub y: usize,
-    pub rows: usize,
-    pub cols: usize,
-    // FIXME: Honestly, these shouldn't exist and rows / columns should be enums like:
-    // Dimension::Flex(usize) / Dimension::Fixed(usize), but 400+ compiler errors is more than
-    // I'm in the mood for right now...
-    pub rows_fixed: bool,
-    pub cols_fixed: bool,
+    pub rows: Dimension,
+    pub cols: Dimension,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct Dimension {
+    constraint: Constraint,
+    inner: usize,
+}
+
+impl Dimension {
+    pub fn fixed(inner: usize) -> Dimension {
+        Self {
+            constraint: Constraint::Fixed,
+            inner,
+        }
+    }
+
+    pub fn as_usize(&self) -> usize {
+        self.inner
+    }
+
+    pub fn is_fixed(&self) -> bool {
+        self.constraint == Constraint::Fixed
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum Constraint {
+    /// Constrains the dimension to a fixed, integer number of rows / columns
+    Fixed,
+    /// Constrains the dimension to a flexible percent size of the total screen
+    Percent(u8),
 }
 
 impl From<Winsize> for PositionAndSize {
     fn from(winsize: Winsize) -> PositionAndSize {
         PositionAndSize {
-            cols: winsize.ws_col as usize,
-            rows: winsize.ws_row as usize,
-            ..Default::default()
+            x: 0,
+            y: 0,
+            cols: Dimension::fixed(winsize.ws_col as usize),
+            rows: Dimension::fixed(winsize.ws_row as usize),
         }
     }
 }
