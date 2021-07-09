@@ -18,7 +18,7 @@ use crate::{
 use zellij_tile::data::{Event, InputMode, ModeInfo, Palette, PluginCapabilities, TabInfo};
 use zellij_utils::{
     errors::{ContextType, ScreenContext},
-    input::options::Options,
+    input::{get_mode_info, options::Options},
     ipc::ClientAttributes,
     pane_size::PositionAndSize,
 };
@@ -434,14 +434,13 @@ pub(crate) fn screen_thread_main(
         bus,
         &client_attributes,
         max_panes,
-        ModeInfo {
-            palette: client_attributes.palette,
-            capabilities: PluginCapabilities {
+        get_mode_info(
+            default_mode,
+            client_attributes.palette,
+            PluginCapabilities {
                 arrow_fonts: capabilities,
             },
-            mode: default_mode,
-            ..ModeInfo::default()
-        },
+        ),
         default_mode,
         session_state,
     );
