@@ -7,8 +7,15 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use log::info;
+
 use crate::consts::{ZELLIJ_TMP_LOG_DIR, ZELLIJ_TMP_LOG_FILE};
 use crate::shared::set_permissions;
+
+pub fn configure_logger() {
+    log4rs::init_file("zellij-utils/assets/config/log4rs.yml", Default::default()).unwrap();
+    info!("Zellij logger initialized");
+}
 
 pub fn atomic_create_file(file_name: &Path) -> io::Result<()> {
     let _ = fs::OpenOptions::new()

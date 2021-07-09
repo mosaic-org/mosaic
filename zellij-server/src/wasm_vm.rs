@@ -1,3 +1,4 @@
+use log::info;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
@@ -16,6 +17,7 @@ use wasmer_wasi::{Pipe, WasiEnv, WasiState};
 use zellij_tile::data::{Event, EventType, PluginIds};
 
 use crate::{
+    decorating_pipe::DecoratingPipe,
     panes::PaneId,
     pty::PtyInstruction,
     screen::ScreenInstruction,
@@ -55,6 +57,7 @@ pub(crate) struct PluginEnv {
 
 // Thread main --------------------------------------------------------------------------------------------------------
 pub(crate) fn wasm_thread_main(bus: Bus<PluginInstruction>, store: Store, data_dir: PathBuf) {
+    info!("Wasm create thread :))");
     let mut plugin_id = 0;
     let mut plugin_map = HashMap::new();
     loop {
@@ -73,6 +76,8 @@ pub(crate) fn wasm_thread_main(bus: Bus<PluginInstruction>, store: Store, data_d
 
                 let output = Pipe::new();
                 let input = Pipe::new();
+                let stderr =
+                    DecoratingPipe::new(path.as_path().file_name().unwrap().to_str().unwrap());
                 let mut wasi_env = WasiState::new("Zellij")
                     .env("CLICOLOR_FORCE", "1")
                     .preopen(|p| {
@@ -85,6 +90,7 @@ pub(crate) fn wasm_thread_main(bus: Bus<PluginInstruction>, store: Store, data_d
                     .unwrap()
                     .stdin(Box::new(input))
                     .stdout(Box::new(output))
+                    .stderr(Box::new(stderr))
                     .finalize()
                     .unwrap();
 
